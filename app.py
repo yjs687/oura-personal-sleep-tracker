@@ -151,7 +151,17 @@ def init_db():
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS oura_data (
+                    id BIGSERIAL PRIMARY KEY,
+                    data_type TEXT NOT NULL,
+                    document_id TEXT NOT NULL,
+                    data JSONB NOT NULL,
+                    day DATE,
+                    synced_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE (data_type, document_id)
+                )
+            """)
 @app.route("/")
 def home():
     return "Oura Personal Sleep Tracker is running."
