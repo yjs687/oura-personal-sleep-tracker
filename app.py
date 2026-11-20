@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import psycopg2
+from psycopg2.extras import Json
 from flask import Flask, redirect, request, jsonify
 import requests
 from cryptography.fernet import Fernet, InvalidToken
@@ -131,6 +132,132 @@ def get_valid_access_token():
             ))
 
             return new_access_token
+def fetch_oura_collection(endpoint, start_date, end_date, token):
+    """获取 Oura 数据并自动处理分页。"""
+
+    url = f"https://api.ouraring.com/v2/usercollection/{endpoint}"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "OuraPersonalSleepTracker/1.0",
+    }
+
+    all_records = []
+    next_token = None
+
+    for page in range(100):
+        params = {
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+
+        if next_token:
+            params["next_token"] = next_token
+
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+
+        if not response.ok:
+            app.logger.error(
+                "Oura data request failed: endpoint=%s HTTP=%s",
+                endpoint,
+                response.status_code,
+            )
+            raise RuntimeError(
+                f"Oura API request failed: {endpoint}"
+            )
+
+        result = response.json()
+        records = result.get("data", [])
+
+        all_records.extend(records)
+
+        next_token = result.get("next_token")
+
+        if not next_token:
+            break
+    else:
+        raise RuntimeError("Oura pagination limit reached.")
+
+    return all_records
+
+
+def save_oura_records(data_type, records):
+    """将 Oura 数据保存到 PostgreSQL，按 ID 去重。"""
+
+    saved_count = 0
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for record in records:
+                document_id = record.get("id")
+
+                if not document_id:
+                    continue
+
+                cur.execute("""
+                    INSERT INTO oura_data (
+                        data_type,
+                        document_id,
+                        data,
+                        day,
+                        synced_at
+                    )
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (data_type, document_id)
+                    DO UPDATE SET
+                        data = EXCLUDED.data,
+                        day = EXCLUDED.day,
+                        synced_at = NOW()
+                """, (
+                    data_type,
+                    document_id,
+                    Json(record),
+                    record.get("day"),
+                ))
+
+                saved_count += 1
+
+    return saved_count
+
+
+def sync_sleep_data():
+    """同步最近30天的睡眠记录和每日睡眠评分。"""
+
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=29)
+
+    start = start_date.isoformat()
+    end = end_date.isoformat()
+
+    token = get_valid_access_token()
+
+    sleep_records = fetch_oura_collection(
+        "sleep", start, end, token
+    )
+
+    daily_records = fetch_oura_collection(
+        "daily_sleep", start, end, token
+    )
+
+    sleep_count = save_oura_records(
+        "sleep", sleep_records
+    )
+
+    daily_count = save_oura_records(
+        "daily_sleep", daily_records
+    )
+
+    return {
+        "period_start": start,
+        "period_end": end,
+        "sleep_records": sleep_count,
+        "daily_sleep_records": daily_count,
+    }
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -323,7 +450,61 @@ def oauth_callback():
     except Exception:
         app.logger.exception("OAuth callback failed")
         return "Authorization processing failed. Check server logs.", 500
+@app.route("/sync", methods=["GET", "POST"])
+def sync_page():
 
+    if request.method == "GET":
+        return """
+        <html>
+        <head>
+            <meta name="viewport"
+                  content="width=device-width, initial-scale=1">
+            <title>Oura Data Sync</title>
+        </head>
+        <body style="font-family:Arial;padding:30px;">
+            <h2>Oura Sleep Data Sync</h2>
+            <form method="POST">
+                <p>Enter your sync password:</p>
+                <input
+                    type="password"
+                    name="secret"
+                    required
+                    style="padding:12px;width:90%;"
+                >
+                <br><br>
+                <button
+                    type="submit"
+                    style="padding:12px 24px;"
+                >
+                    Start Sync
+                </button>
+            </form>
+        </body>
+        </html>
+        """
+
+    supplied_secret = request.form.get("secret", "")
+
+    if not secrets.compare_digest(
+        supplied_secret,
+        get_env("OURA_SYNC_SECRET")
+    ):
+        return "Invalid password.", 403
+
+    try:
+        result = sync_sleep_data()
+
+        return jsonify({
+            "status": "success",
+            **result
+        })
+
+    except Exception:
+        app.logger.exception("Sleep data synchronization failed")
+        return jsonify({
+            "status": "error",
+            "message": "Synchronization failed. Check server logs."
+        }), 500
 @app.route("/api/status")
 def api_status():
     try:
