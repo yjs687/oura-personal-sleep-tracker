@@ -48,7 +48,89 @@ def encrypt(value):
 
 def decrypt(value):
     return cipher().decrypt(value.encode()).decode()
+def get_valid_access_token():
+    """
+    获取有效的 Oura Access Token。
+    如果即将过期，则自动使用 Refresh Token 续期。
+    Oura 的 Refresh Token 是一次性令牌，
+    所以每次续期必须同时保存新的两个令牌。
+    """
 
+    now = datetime.now(timezone.utc)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+
+            # 锁定令牌记录，避免并发续期
+            cur.execute("""
+                SELECT access_token, refresh_token, expires_at
+                FROM oauth_tokens
+                WHERE id = 1
+                FOR UPDATE
+            """)
+
+            row = cur.fetchone()
+
+            if not row:
+                raise RuntimeError("Oura account is not connected.")
+
+            access_token = decrypt(row[0])
+            refresh_token = decrypt(row[1])
+            expires_at = row[2]
+
+            # 如果距离过期还有5分钟以上，直接使用旧令牌
+            if expires_at and expires_at > now + timedelta(minutes=5):
+                return access_token
+
+            # 使用 Refresh Token 请求新令牌
+            response = requests.post(
+                OURA_TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": get_env("OURA_CLIENT_ID"),
+                    "client_secret": get_env("OURA_CLIENT_SECRET"),
+                },
+                headers={
+                    "User-Agent": "OuraPersonalSleepTracker/1.0"
+                },
+                timeout=30,
+            )
+
+            if not response.ok:
+                app.logger.error(
+                    "Oura token refresh failed: HTTP %s",
+                    response.status_code
+                )
+                raise RuntimeError("Oura token refresh failed.")
+
+            tokens = response.json()
+
+            new_access_token = tokens.get("access_token")
+            new_refresh_token = tokens.get("refresh_token")
+
+            if not new_access_token or not new_refresh_token:
+                raise RuntimeError("Oura did not return new tokens.")
+
+            new_expires_at = now + timedelta(
+                seconds=int(tokens.get("expires_in", 86400))
+            )
+
+            # 同时更新两个令牌
+            cur.execute("""
+                UPDATE oauth_tokens
+                SET access_token = %s,
+                    refresh_token = %s,
+                    expires_at = %s,
+                    updated_at = NOW()
+                WHERE id = 1
+            """, (
+                encrypt(new_access_token),
+                encrypt(new_refresh_token),
+                new_expires_at,
+            ))
+
+            return new_access_token
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
