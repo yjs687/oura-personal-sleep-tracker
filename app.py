@@ -505,6 +505,90 @@ def sync_page():
             "status": "error",
             "message": "Synchronization failed. Check server logs."
         }), 500
+@app.route("/stats", methods=["GET", "POST"])
+def stats_page():
+
+    if request.method == "GET":
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport"
+                  content="width=device-width, initial-scale=1">
+            <title>Oura Database Statistics</title>
+        </head>
+        <body style="font-family:Arial;padding:30px;">
+            <h2>Oura Database Statistics</h2>
+            <form method="POST">
+                <p>Enter your sync password:</p>
+                <input
+                    type="password"
+                    name="secret"
+                    required
+                    style="padding:12px;width:90%;"
+                >
+                <br><br>
+                <button type="submit" style="padding:12px 24px;">
+                    View Statistics
+                </button>
+            </form>
+        </body>
+        </html>
+        """
+
+    supplied_secret = request.form.get("secret", "")
+
+    if not secrets.compare_digest(
+        supplied_secret,
+        get_env("OURA_SYNC_SECRET")
+    ):
+        return "Invalid password.", 403
+
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        data_type,
+                        COUNT(*),
+                        MIN(day),
+                        MAX(day),
+                        MAX(synced_at)
+                    FROM oura_data
+                    GROUP BY data_type
+                    ORDER BY data_type
+                """)
+
+                rows = cur.fetchall()
+
+        statistics = []
+
+        for row in rows:
+            statistics.append({
+                "data_type": row[0],
+                "record_count": row[1],
+                "first_day": (
+                    row[2].isoformat() if row[2] else None
+                ),
+                "last_day": (
+                    row[3].isoformat() if row[3] else None
+                ),
+                "last_synced_at": (
+                    row[4].isoformat() if row[4] else None
+                ),
+            })
+
+        return jsonify({
+            "status": "success",
+            "statistics": statistics
+        })
+
+    except Exception:
+        app.logger.exception("Database statistics failed")
+        return jsonify({
+            "status": "error",
+            "message": "Unable to read database statistics."
+        }), 500
 @app.route("/api/status")
 def api_status():
     try:
