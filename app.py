@@ -1,7 +1,74 @@
 
-from flask import Flask, request
+import os
+import secrets
+import hashlib
+import base64
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
+
+import psycopg2
+from flask import Flask, redirect, request, jsonify
+import requests
+from cryptography.fernet import Fernet, InvalidToken
 
 app = Flask(__name__)
+
+OURA_AUTHORIZE_URL = "https://cloud.ouraring.com/oauth/authorize"
+OURA_TOKEN_URL = "https://api.ouraring.com/oauth/token"
+
+OURA_SCOPES = [
+    "email",
+    "personal",
+    "daily",
+    "heartrate",
+    "workout",
+    "tag",
+    "session",
+    "spo2",
+]
+
+def get_env(name):
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"Missing environment variable: {name}")
+    return value
+
+def get_db():
+    return psycopg2.connect(get_env("DATABASE_URL"))
+
+def cipher():
+    secret = get_env("TOKEN_ENCRYPTION_SECRET")
+    key = base64.urlsafe_b64encode(
+        hashlib.sha256(secret.encode("utf-8")).digest()
+    )
+    return Fernet(key)
+
+def encrypt(value):
+    return cipher().encrypt(value.encode()).decode()
+
+def decrypt(value):
+    return cipher().decrypt(value.encode()).decode()
+
+def init_db():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS oauth_states (
+                    state_hash TEXT PRIMARY KEY,
+                    verifier TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS oauth_tokens (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT NOT NULL,
+                    expires_at TIMESTAMPTZ,
+                    scopes TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
 
 @app.route("/")
 def home():
@@ -9,23 +76,185 @@ def home():
 
 @app.route("/health")
 def health():
-    return {"status": "ok"}
+    try:
+        init_db()
+        return jsonify({"status": "ok", "database": "connected"})
+    except Exception:
+        return jsonify({
+            "status": "error",
+            "database": "unavailable"
+        }), 503
+
+@app.route("/login")
+def login():
+    try:
+        client_id = get_env("OURA_CLIENT_ID")
+        redirect_uri = get_env("OURA_REDIRECT_URI")
+
+        state = secrets.token_urlsafe(32)
+        verifier = secrets.token_urlsafe(64)
+
+        challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode()).digest()
+        ).decode().rstrip("=")
+
+        state_hash = hashlib.sha256(state.encode()).hexdigest()
+
+        init_db()
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM oauth_states
+                    WHERE created_at < NOW() - INTERVAL '10 minutes'
+                """)
+                cur.execute("""
+                    INSERT INTO oauth_states (state_hash, verifier)
+                    VALUES (%s, %s)
+                """, (state_hash, encrypt(verifier)))
+
+        params = {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": " ".join(OURA_SCOPES),
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+
+        return redirect(
+            OURA_AUTHORIZE_URL + "?" + urlencode(params)
+        )
+
+    except Exception:
+        app.logger.exception("OAuth login initialization failed")
+        return "Unable to start Oura authorization. Check server configuration.", 500
 
 @app.route("/oauth/callback")
 def oauth_callback():
     error = request.args.get("error")
+
     if error:
-        return "Oura authorization was not completed.", 400
+        return "Oura authorization was declined or failed.", 400
 
     code = request.args.get("code")
     state = request.args.get("state")
 
     if not code or not state:
-        return "Missing OAuth authorization parameters.", 400
+        return "Missing authorization code or state.", 400
 
-    # The authorization code will be securely exchanged
-    # for tokens in the next development step.
-    return (
-        "Oura authorization callback received. "
-        "You may close this page."
-    )
+    try:
+        init_db()
+
+        state_hash = hashlib.sha256(state.encode()).hexdigest()
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM oauth_states
+                    WHERE state_hash = %s
+                    AND created_at > NOW() - INTERVAL '10 minutes'
+                    RETURNING verifier
+                """, (state_hash,))
+                row = cur.fetchone()
+
+        if not row:
+            return "Invalid or expired authorization state.", 400
+
+        verifier = decrypt(row[0])
+
+        token_response = requests.post(
+            OURA_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": get_env("OURA_REDIRECT_URI"),
+                "client_id": get_env("OURA_CLIENT_ID"),
+                "client_secret": get_env("OURA_CLIENT_SECRET"),
+                "code_verifier": verifier,
+            },
+            headers={"User-Agent": "OuraPersonalSleepTracker/1.0"},
+            timeout=30,
+        )
+
+        if not token_response.ok:
+            app.logger.error(
+                "Oura token exchange failed: HTTP %s",
+                token_response.status_code
+            )
+            return "Oura token exchange failed. Please check server logs.", 502
+
+        tokens = token_response.json()
+
+        access_token = tokens.get("access_token")
+        refresh_token = tokens.get("refresh_token")
+
+        if not access_token or not refresh_token:
+            return "Oura did not return the expected tokens.", 502
+
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=int(tokens.get("expires_in", 86400))
+        )
+
+        granted_scopes = tokens.get(
+            "scope", " ".join(OURA_SCOPES)
+        )
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO oauth_tokens (
+                        id, access_token, refresh_token,
+                        expires_at, scopes, updated_at
+                    )
+                    VALUES (1, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (id) DO UPDATE SET
+                        access_token = EXCLUDED.access_token,
+                        refresh_token = EXCLUDED.refresh_token,
+                        expires_at = EXCLUDED.expires_at,
+                        scopes = EXCLUDED.scopes,
+                        updated_at = NOW()
+                """, (
+                    encrypt(access_token),
+                    encrypt(refresh_token),
+                    expires_at,
+                    granted_scopes,
+                ))
+
+        return """
+        <h2>Oura authorization successful</h2>
+        <p>Your authorization tokens have been securely stored.</p>
+        <p>You may close this page.</p>
+        """
+
+    except Exception:
+        app.logger.exception("OAuth callback failed")
+        return "Authorization processing failed. Check server logs.", 500
+
+@app.route("/api/status")
+def api_status():
+    try:
+        init_db()
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT expires_at, scopes
+                    FROM oauth_tokens
+                    WHERE id = 1
+                """)
+                row = cur.fetchone()
+
+        if not row:
+            return jsonify({"connected": False})
+
+        return jsonify({
+            "connected": True,
+            "expires_at": row[0].isoformat() if row[0] else None,
+            "scopes": row[1],
+        })
+
+    except Exception:
+        app.logger.exception("Status check failed")
+        return jsonify({"error": "Status unavailable"}), 500
