@@ -221,9 +221,8 @@ def save_oura_records(data_type, records):
                 ))
 
                 saved_count += 1
- 
 
-                  return saved_count
+    return saved_count
 
 def sync_sleep_data():
     """同步最近30天的睡眠记录和每日睡眠评分。"""
