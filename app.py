@@ -216,6 +216,7 @@ def save_oura_records(data_type, records):
                     data_type,
                     document_id,
                     Json(record),
+
                     record.get("day") or record.get("start_day"),
                 ))
 
