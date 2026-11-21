@@ -700,8 +700,6 @@ def api_status():
     except Exception:
         app.logger.exception("Status check failed")
         return jsonify({"error": "Status unavailable"}), 500
-
-
 @app.route("/api/data", methods=["GET"])
 def api_get_data():
     api_key = os.getenv("OURA_API_KEY")
@@ -720,8 +718,13 @@ def api_get_data():
         return jsonify({"error": "Unauthorized"}), 401
 
     allowed_types = {
-        "sleep", "daily_sleep", "daily_activity",
-        "daily_spo2", "workout", "enhanced_tag", "session"
+        "sleep",
+        "daily_sleep",
+        "daily_activity",
+        "daily_spo2",
+        "workout",
+        "enhanced_tag",
+        "session"
     }
 
     data_type = request.args.get("data_type", "all")
@@ -735,12 +738,15 @@ def api_get_data():
             if request.args.get("end_date")
             else datetime.now(timezone.utc).date()
         )
+
         start = (
             datetime.fromisoformat(request.args["start_date"]).date()
             if request.args.get("start_date")
             else end - timedelta(days=29)
         )
+
         limit = int(request.args.get("limit", 200))
+
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid date or limit"}), 400
 
@@ -752,6 +758,7 @@ def api_get_data():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+
                 if data_type == "all":
                     cur.execute("""
                         SELECT data_type, document_id, data, day
@@ -760,6 +767,7 @@ def api_get_data():
                         ORDER BY day DESC NULLS LAST
                         LIMIT %s
                     """, (start, end, limit))
+
                 else:
                     cur.execute("""
                         SELECT data_type, document_id, data, day
@@ -793,4 +801,3 @@ def api_get_data():
     except Exception:
         app.logger.exception("Oura data query failed")
         return jsonify({"error": "Data query failed"}), 500
-
