@@ -289,6 +289,50 @@ def init_db():
                     UNIQUE (data_type, document_id)
                 )
             """)
+def sync_additional_data():
+    """同步最近30天的活动、运动和血氧数据。"""
+
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=29)
+
+    start = start_date.isoformat()
+    end = end_date.isoformat()
+
+    token = get_valid_access_token()
+
+    endpoints = [
+        "daily_activity",
+        "workout",
+        "daily_spo2",
+    ]
+
+    results = {}
+
+    for endpoint in endpoints:
+        try:
+            records = fetch_oura_collection(
+                endpoint, start, end, token
+            )
+
+            count = save_oura_records(endpoint, records)
+
+            results[endpoint] = {
+                "record_count": count,
+                "status": "success",
+            }
+
+        except Exception:
+            app.logger.exception(
+                "Failed to sync Oura endpoint: %s",
+                endpoint
+            )
+
+            results[endpoint] = {
+                "status": "error",
+                "message": "This data type could not be synchronized."
+            }
+
+    return results
 @app.route("/")
 def home():
     return "Oura Personal Sleep Tracker is running."
@@ -492,12 +536,15 @@ def sync_page():
         return "Invalid password.", 403
 
     try:
-        result = sync_sleep_data()
+result = sync_sleep_data()
 
-        return jsonify({
-            "status": "success",
-            **result
-        })
+additional_result = sync_additional_data()
+
+return jsonify({
+    "status": "success",
+    "sleep": result,
+    "additional_data": additional_result
+})
 
     except Exception:
         app.logger.exception("Sleep data synchronization failed")
