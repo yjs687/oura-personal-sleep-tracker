@@ -184,7 +184,76 @@ def fetch_oura_collection(endpoint, start_date, end_date, token):
         raise RuntimeError("Oura pagination limit reached.")
 
     return all_records
+def fetch_oura_heartrate(start_datetime, end_datetime, token):
+    """获取 Oura 全天心率数据，并处理分页。"""
 
+    url = "https://api.ouraring.com/v2/usercollection/heartrate"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "OuraPersonalSleepTracker/1.0",
+    }
+
+    all_records = []
+    next_token = None
+
+    for page in range(100):
+        params = {
+            "start_datetime": start_datetime,
+            "end_datetime": end_datetime,
+        }
+
+        if next_token:
+            params["next_token"] = next_token
+
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=60,
+        )
+
+        if not response.ok:
+            app.logger.error(
+                "Oura heartrate request failed: HTTP %s",
+                response.status_code,
+            )
+            raise RuntimeError("Oura heartrate request failed.")
+
+        result = response.json()
+        all_records.extend(result.get("data", []))
+
+        next_token = result.get("next_token")
+        if not next_token:
+            break
+    else:
+        raise RuntimeError("Heartrate pagination limit reached.")
+
+    return all_records
+
+
+def sync_heartrate_data():
+    """同步最近30天的全天心率数据。"""
+
+    end_datetime = datetime.now(timezone.utc)
+    start_datetime = end_datetime - timedelta(days=29)
+
+    token = get_valid_access_token()
+
+    records = fetch_oura_heartrate(
+        start_datetime.isoformat(),
+        end_datetime.isoformat(),
+        token,
+    )
+
+    count = save_oura_records("heartrate", records)
+
+    return {
+        "record_count": count,
+        "status": "success",
+        "period_start": start_datetime.isoformat(),
+        "period_end": end_datetime.isoformat(),
+    }
 def save_oura_records(data_type, records):
     """将 Oura 数据保存到 PostgreSQL，按 ID 去重。"""
 
@@ -193,8 +262,10 @@ def save_oura_records(data_type, records):
     with get_db() as conn:
         with conn.cursor() as cur:
             for record in records:
-                document_id = record.get("id")
-
+                document_id = (
+                    record.get("id")
+                    or record.get("timestamp")
+                )
                 if not document_id:
                     continue
 
@@ -217,9 +288,13 @@ def save_oura_records(data_type, records):
                     data_type,
                     document_id,
                     Json(record),
-                    record.get("day") or record.get("start_day"),
-                ))
-
+                    record.get("day")
+                    or record.get("start_day")
+                    or (
+                        record.get("timestamp", "")[:10]
+                        if record.get("timestamp")
+                        else None
+                    ),
                 saved_count += 1
 
     return saved_count
@@ -303,8 +378,9 @@ def sync_additional_data():
         "daily_activity",
         "workout",
         "daily_spo2",
+        "daily_readiness",
+        "daily_stress",
     ]
-
     results = {}
 
     for endpoint in endpoints:
@@ -575,14 +651,15 @@ def sync_page():
         result = sync_sleep_data()
         additional_result = sync_additional_data()
         context_result = sync_context_data()
+        heartrate_result = sync_heartrate_data()
 
         return jsonify({
             "status": "success",
             "sleep": result,
             "additional_data": additional_result,
-            "context_data": context_result
+            "context_data": context_result,
+            "heartrate": heartrate_result,
         })
-
     except Exception:
         app.logger.exception("Sleep data synchronization failed")
         return jsonify({
