@@ -536,15 +536,17 @@ def sync_page():
         return "Invalid password.", 403
 
     try:
-result = sync_sleep_data()
+    try:
+        result = sync_sleep_data()
+        additional_result = sync_additional_data()
+        context_result = sync_context_data()
 
-additional_result = sync_additional_data()
-
-return jsonify({
-    "status": "success",
-    "sleep": result,
-    "additional_data": additional_result
-})
+        return jsonify({
+            "status": "success",
+            "sleep": result,
+            "additional_data": additional_result,
+            "context_data": context_result
+        })
 
     except Exception:
         app.logger.exception("Sleep data synchronization failed")
