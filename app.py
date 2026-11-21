@@ -185,7 +185,6 @@ def fetch_oura_collection(endpoint, start_date, end_date, token):
 
     return all_records
 
-
 def save_oura_records(data_type, records):
     """将 Oura 数据保存到 PostgreSQL，按 ID 去重。"""
 
@@ -218,11 +217,11 @@ def save_oura_records(data_type, records):
                     document_id,
                     Json(record),
                     record.get("day") or record.get("start_day"),
+                ))
 
                 saved_count += 1
 
     return saved_count
-
 
 def sync_sleep_data():
     """同步最近30天的睡眠记录和每日睡眠评分。"""
