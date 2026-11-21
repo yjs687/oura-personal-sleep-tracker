@@ -217,8 +217,7 @@ def save_oura_records(data_type, records):
                     data_type,
                     document_id,
                     Json(record),
-                    record.get("day"),
-                ))
+                    record.get("day") or record.get("start_day"),
 
                 saved_count += 1
 
@@ -333,6 +332,7 @@ def sync_additional_data():
             }
 
     return results
+
 def sync_context_data():
     """Synchronize enhanced tags and sessions."""
 
@@ -343,7 +343,6 @@ def sync_context_data():
     end = end_date.isoformat()
 
     token = get_valid_access_token()
-
     results = {}
 
     for endpoint in ["enhanced_tag", "session"]:
@@ -351,10 +350,7 @@ def sync_context_data():
             records = fetch_oura_collection(
                 endpoint, start, end, token
             )
-
-            count = save_oura_records(
-                endpoint, records
-            )
+            count = save_oura_records(endpoint, records)
 
             results[endpoint] = {
                 "record_count": count,
@@ -371,6 +367,7 @@ def sync_context_data():
             }
 
     return results
+
 @app.route("/")
 def home():
     return "Oura Personal Sleep Tracker is running."
@@ -573,6 +570,7 @@ def sync_page():
     ):
         return "Invalid password.", 403
 
+
     try:
         result = sync_sleep_data()
         additional_result = sync_additional_data()
@@ -591,6 +589,7 @@ def sync_page():
             "status": "error",
             "message": "Synchronization failed. Check server logs."
         }), 500
+
 @app.route("/stats", methods=["GET", "POST"])
 def stats_page():
 
