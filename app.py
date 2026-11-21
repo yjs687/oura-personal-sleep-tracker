@@ -333,6 +333,44 @@ def sync_additional_data():
             }
 
     return results
+def sync_context_data():
+    """Synchronize enhanced tags and sessions."""
+
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=29)
+
+    start = start_date.isoformat()
+    end = end_date.isoformat()
+
+    token = get_valid_access_token()
+
+    results = {}
+
+    for endpoint in ["enhanced_tag", "session"]:
+        try:
+            records = fetch_oura_collection(
+                endpoint, start, end, token
+            )
+
+            count = save_oura_records(
+                endpoint, records
+            )
+
+            results[endpoint] = {
+                "record_count": count,
+                "status": "success"
+            }
+
+        except Exception:
+            app.logger.exception(
+                "Failed to sync %s", endpoint
+            )
+            results[endpoint] = {
+                "status": "error",
+                "message": "Synchronization failed."
+            }
+
+    return results
 @app.route("/")
 def home():
     return "Oura Personal Sleep Tracker is running."
@@ -535,7 +573,6 @@ def sync_page():
     ):
         return "Invalid password.", 403
 
-    try:
     try:
         result = sync_sleep_data()
         additional_result = sync_additional_data()
