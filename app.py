@@ -198,6 +198,7 @@ def save_oura_records(data_type, records):
                 if not document_id:
                     continue
 
+
                 cur.execute("""
                     INSERT INTO oura_data (
                         data_type,
@@ -216,13 +217,13 @@ def save_oura_records(data_type, records):
                     data_type,
                     document_id,
                     Json(record),
-
                     record.get("day") or record.get("start_day"),
                 ))
 
                 saved_count += 1
+ 
 
-    return saved_count
+                  return saved_count
 
 def sync_sleep_data():
     """同步最近30天的睡眠记录和每日睡眠评分。"""
