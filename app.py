@@ -254,8 +254,9 @@ def sync_heartrate_data():
         "period_start": start_datetime.isoformat(),
         "period_end": end_datetime.isoformat(),
     }
+
 def save_oura_records(data_type, records):
-    """将 Oura 数据保存到 PostgreSQL，按 ID 去重。"""
+    """将 Oura 数据保存到 PostgreSQL，按 ID 或时间戳去重。"""
 
     saved_count = 0
 
@@ -266,9 +267,19 @@ def save_oura_records(data_type, records):
                     record.get("id")
                     or record.get("timestamp")
                 )
+
                 if not document_id:
                     continue
 
+                record_day = (
+                    record.get("day")
+                    or record.get("start_day")
+                    or (
+                        record.get("timestamp", "")[:10]
+                        if record.get("timestamp")
+                        else None
+                    )
+                )
 
                 cur.execute("""
                     INSERT INTO oura_data (
@@ -288,16 +299,13 @@ def save_oura_records(data_type, records):
                     data_type,
                     document_id,
                     Json(record),
-                    record.get("day")
-                    or record.get("start_day")
-                    or (
-                        record.get("timestamp", "")[:10]
-                        if record.get("timestamp")
-                        else None
-                    ),
+                    record_day,
+                ))
+
                 saved_count += 1
 
     return saved_count
+
 
 def sync_sleep_data():
     """同步最近30天的睡眠记录和每日睡眠评分。"""
@@ -799,11 +807,13 @@ def api_get_data():
         "daily_sleep",
         "daily_activity",
         "daily_spo2",
+        "daily_readiness",
+        "daily_stress",
+        "heartrate",
         "workout",
         "enhanced_tag",
         "session"
     }
-
     data_type = request.args.get("data_type", "all")
 
     if data_type != "all" and data_type not in allowed_types:
