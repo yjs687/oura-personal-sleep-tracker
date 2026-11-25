@@ -655,11 +655,13 @@ def sync_page():
         return "Invalid password.", 403
 
 
-    try:
-        result = sync_sleep_data()
-        additional_result = sync_additional_data()
-        context_result = sync_context_data()
-        heartrate_result = sync_heartrate_data()
+    result = sync_sleep_data()
+
+additional_result = sync_additional_data()
+
+context_result = {"status": "temporarily_disabled"}
+
+heartrate_result = {"status": "temporarily_disabled"}
 
         return jsonify({
             "status": "success",
