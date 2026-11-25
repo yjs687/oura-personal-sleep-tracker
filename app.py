@@ -655,13 +655,11 @@ def sync_page():
         return "Invalid password.", 403
 
 
-    result = sync_sleep_data()
-
-additional_result = sync_additional_data()
-
-context_result = {"status": "temporarily_disabled"}
-
-heartrate_result = {"status": "temporarily_disabled"}
+    try:
+        result = sync_sleep_data()
+        additional_result = sync_additional_data()
+        context_result = {"status": "temporarily_disabled"}
+        heartrate_result = {"status": "temporarily_disabled"}
 
         return jsonify({
             "status": "success",
@@ -670,13 +668,13 @@ heartrate_result = {"status": "temporarily_disabled"}
             "context_data": context_result,
             "heartrate": heartrate_result,
         })
+
     except Exception:
         app.logger.exception("Sleep data synchronization failed")
         return jsonify({
             "status": "error",
             "message": "Synchronization failed. Check server logs."
         }), 500
-
 @app.route("/stats", methods=["GET", "POST"])
 def stats_page():
 
